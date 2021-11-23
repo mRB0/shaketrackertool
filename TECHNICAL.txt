@@ -1,0 +1,334 @@
+# Details about 0.1.x format
+
+I read the code and inspected one file that I have to understand this.
+
+## Structure
+
+Patterns are stored per-instrument,
+
+so when you see a single pattern in the UI with 5 instruments in it,
+it's actually stored across 5 instruments, as the first pattern for each instrument.
+
+Strings are null-terminated, and note that they are not zeroed, so eg. instrument name of length 25 may be "Drums\0GARBAGEGARBAGEGARBA"
+
+### Instruments block
+
+[Instrument][Instrument]...
+
+### Instrument
+
+[InstrumentHeader][Pattern][Pattern]...
+
+### InstrumentHeader
+
+Total length = 163 (0xa3)
+
+(Length in bytes: Description)
+
+25: Instrument Name
+1: Default vol
+1: Global vol
+1: "device"
+1: bank
+1: patch
+1: "channel"
+1: "PBS" pitch bend sensitivity
+1: active
+1: visible (always enabled: if value is 0, set to 1 on load)
+1: force_linear_volume
+128: initial_controller (eg. 0xff repeated 128 times)
+
+### Pattern
+
+[PatternHeader][Frame][Frame]...
+
+### PatternHeader
+
+[RowCount][ColCount][PatternDataSize]
+
+RowCount - 1 byte, row count
+ColCount - 1 byte, col count
+PatternDataSize - 3 bytes, little endian, count of upcoming bytes containing all frames for this pattern
+
+Common example: RowCount 0x40 means 64 rows
+
+### Frame
+
+[FrameHeader][Data]
+
+### FrameHeader & Data
+
+Header indicates upcoming data bytes.
+1 byte, bit field.
+If a bit is set, indicates more bytes for corresponding data; length depends on bit.
+
+Bit field bits:
+
+nvcptlrX
+
+- n note: add 1 data byte for note data
+- v volume: add 1 data byte for volume data
+- c command: add 1 data byte for command data
+- p parameter: add 1 data byte for parameter data
+- t controller set: add 1 data byte for parameter data
+- l controller value: add 1 data byte for parameter data
+- r repeat: add 2 data bytes for (repeat count - 1), big-endian
+- X always 0
+
+#### Typical headers
+
+0xfc All except repeat (first note)
+0x8e Note, controller set, controller value, repeat
+0x82 Note, repeat
+0xc0 Note, volume
+0xc2 Note, volume, repeat
+
+#### Data conversion/interpretation
+
+note CLEAR: sht2 val = 0, sht3 val = 255
+note OFF: sht2 val > 128, sht3 val = 254
+
+vol unset: sht2 val > 64, sht3 val = 65 (sht2 sets to 65, so essentially changed)
+
+command CLEAR: sht2 val = 0, sht3 val = 255
+
+controller_set CLEAR: sht2 val = 0, sht3 val = 255
+
+parameter CLEAR: both 0
+
+controller_value CLEAR: both 0
+
+
+#### Examples
+
+First header typically 0xfc = 0b11111100 = all set except two LSB (I guess repeat is also possible)
+
+0xc02541 = Set note 0x25 and volume 0x41, row doesn't repeat
+0xc200410004 = Set note 0x00 and volume, occurs 5 times (0x0004 + 1)
+
+
+#
+# Shaketracker 2 (or 3?) file format
+#
+
+;
+; --- file header ---
+;
+
+"SHKT-SONG\x00"
+0x02 00 00 00   ; probably:
+                ;   [version:2,LE]
+                ;   [author:pascal] [name:pascal]
+                ; these values NEVER vary among my files
+
+[tempo:1] [speed:1] ; 1 byte for each
+
+;
+; --- pattern info ---
+;
+
+[pattern_count:2,LE]
+
+for range(pattern_count):
+    [row_count:2,LE] [highlight_minor:2,LE] [highlight_major:2,LE]  ; eg. 0x40 00 04 00 10 00
+
+;
+; --- order info ---
+;
+
+[order_count:2,LE]    ; typically 0x01f4 = 500, maybe never varies
+
+for range(order_count):
+    [pattern_id:2,LE]  ; 0x0004 means ---, 0x0005 means pattern 0, 0x0006 pattern 1, ...
+
+;
+; --- instrument info ---
+;
+
+[instrument_count:2,LE] ; 0x0005 means 5 instruments
+
+for range(instrument_count):
+    ;
+    ; --- instrument header ---
+    ;
+
+    [instrument_name:pascal]  ; eg. 0x05 "Drums"
+    [device?:1] [bank?:1] [patch:1] [channel:1] [pbs:1] [?:1] [default_volume:1] [global_volume:1] [?:1] [?:1] [?:1] ; see instrument header map below
+
+    [initial_controller_values:128] ; always 0xff
+    [?:130]                         ; not sure what this block contains
+    [column_count:1]                ; number of tracks for this instrument.
+
+    ;
+    ; --- pattern data ---
+    ;
+    ; Roughly the same packed format as 0.1.x, so see that description above.
+    ; Row/col count are moved, see row_count and column_count.
+    ; PatternDataSize is 4 bytes, LE.
+    ;
+    ; Conceptually, all the columns for one pattern of an instrument are
+    ; stacked on top of one another, then THAT is packed. So an empty
+    ; instrument pattern that's 3 columns wide and 64 rows long is stored
+    ; as an empty value repeated 192 times, instead of three empty values
+    ; repeated 64 times each.
+    ;
+    ; Each pattern IS separated, one after the other, so if there are
+    ; three instruments and 50 patterns, the structure is roughly:
+    ;
+    ; [inst0][inst0ptn0][inst0ptn1][inst0ptn2][...][inst0ptn49][inst1][inst1ptn0]...
+    ;
+    ; and each pattern has its own 4-byte PatternDataSize prefix.
+    ;
+
+0x02 00 ; ??? looks like a 2-byte LE length
+"SHKT-INST"
+
+... remainder of file is pascal strings - controller and instrument names?
+
+
+
+# Shaketracker 2/3 notes
+
+Rough reverse-engineering notes.
+
+
+## MISSING stuff that's important
+
+nothing! but I still have outstanding questions about some mystery values, like that one next to pitch bend sensitivity
+
+
+## Pattern lengths?
+
+At offset 0x10, 0x32 00 (number of patterns?)
+
+At offset 0x12, repeated 50 (0x32) times: 0x40 00 04 00 10 00
+
+In another file: [30 00 04 00 0c 00] [60 00 04 00 0c 00] [60 00 04 00 0c 00] then [40 00 04 00 10 00] repeated
+
+In other files, I saw segments like: [60 00 04 00 10 00], [56 00 04 00 10 00], [42 00 04 00 10 00], [30 00 04 00 10 00], [78 00 04 00 10 00]
+
+Actually only saw ONE file where the fifth byte was not 0x10 (it was 0x0c)
+
+I BELIEVE this is 2-byte little-endian: row count, ??, ??
+
+
+## Order list
+
+Starts at 0x140 I think, length 1000 (0x3e8) (500 entries)
+
+Little endian values.
+
+0x0400 (4) = ---
+0x0500 (5) = pat 0
+0x0600 (6) = pat 1 etc.
+
+mostly the region contains 04 00 04 00 04 00 ... because unused orders are just initialized to ---
+
+
+## Pattern headers
+
+header 0x074f000000 seems to be [track count 1 byte] [4 byte pattern length LE] ie. pattern length = 0x0000004f. I think 0x07 is track count
+
+next header 0x77000000 ???
+
+
+possible header starts in file.sht by looking for 0xfc values:
+
+offs 0x63e (.............) = 0x6f000000, before offs 0x642 (val 0xfc)
+offs 0x6b1 (0x642 + 0x06f) = 0x41010000, before offs 0x6b5 (val 0xfc)
+offs 0x7f6 (0x6b5 + 0x141) = 0x7d000000, before offs 0x7fa (val 0xfc)
+
+where are row and column counts?
+row count can be inferred from row data
+column count ..??? there's a 0x04 byte before the first count, maybe that's col count?
+but it seems like there are only 3 columns. also, each instrument can have multiple columns, so how is that indicated?
+
+## Instrument header notes
+
+Instrument header length = 114 bytes
+
+Order list goes to offset 0x528 (eg. file.sht, file3.sht)
+
+Then something unidentified at 0x528:
+
+0x01 00 - or 0x04 00, 0x06 00, not sure what this is
+
+Then instrument at 0x52a:
+
+file3.sht:  0x09 "Something" 00 00 7c 00 02 02 40 7f 00 0b 00
+file.sht:   0x05 "Piano"     00 00 01 00 02 02 40 7f 00 0b 00
+file19.sht:      "Piano"     00 00 02 00 02 00 40 7f 00 0b 00 (first instrument)
+file19.sht:      "Bass"      00 00 23 01 02 a8 40 7f 00 0b 00 (second)
+file19.sht:      "Drums"     00 00 00 09 02 f9 40 7f 00 0b 00 (third)
+file19.sht:      "Guitar"    00 00 1b 03 02 c9 40 7f 00 0b 00 (fourth)
+file19.sht:      "Brass"     00 00 3d 04 02 00 40 7f 00 0b 00 (fifth)
+                                   ^^ ^^ ^^ ^^ ^^ ^^
+                                   || || || || || \\_________ global volume (default 127)
+                                   || || || || \\____________ default volume (default 64)
+                                   || || || \\_______________ ???
+                                   || || \\__________________ ??? pitch bend sensitivity
+                                   || \\_____________________ channel. eg channel 9 (10 if 1-indexed) always means percussion
+                                   \\________________________ patch. eg 0x3d + 1 = 62 = "Brass Section", 0x23 + 1 = 36 = "Fretless bass"
+
+09 "Something", 05 "Piano" looks like a pascal string (length prefix)
+
+Next data is:
+
+then 0xff 128 times
+then 130 bytes, mostly 0, but not all.
+    -> sometimes not mostly 0! eg. file19.sht offset 0x5bb: 00 04 00 17 40 01 01 04 00 04 03 00 40 01 01 01 01 00 00 ff bf ...
+then pattern header etc.
+
+## Counting patterns
+
+### file3.sht
+
+50 (0x32) patterns listed near file start, which is the same as every file
+all length 0x40 (64)
+
+Inst 1 [01 00 NAME]
+    50 patterns, mostly empty
+    Repeating pattern len[09 00 00 00] frame[fe 00 41 00 00 00 00 00 3f] = (0x3f+1=0x40=64, ok!) repeated empty notes
+
+### file20.sht
+
+50 patterns
+all length 0x40
+
+Inst 1 [06 00 04:Harp]
+    8 + 10 + 10 + 10 + 10 + ? (miscounted, approx 50)
+
+### file19.sht
+
+50 patterns all length 0x40
+
+Inst 1 "Piano" pattern starts at 0x63e. hex numbers, file offsets are to 4-byte length; length is pattern data only
+    63e len 13f
+    781 len 13b
+    8c0 len 13d
+    a01 len 13b
+    b40 len 27
+    b6b len 9
+    + 10 + 10 + 10 + 10 + 4 = 50
+
+note 0x04 at offset 0x63d, I think this is track count
+
+Counting notes:
+
+    0x63e = 1 1 6 1 5 1 1 2 1 1 4 1 7 1 1 6 1 5 1 1 2 1 1 4 1 7 1 1 6 1 5 1 1 2 1 1 4 1 7 1 1 6 1 5 1 1 2 1 1 4 1 7 1 1 6 1 5 1 1 2 1 1 4 1 7 1 1 6 1 5 1 1 2 1 1 4 (c0) 1 (c2) 7 1 1 6 1 5 1 1 2 1 1 4 1 7 1 1 6 1 5 1 1 2 1 1 4 1 7 = length 256.
+
+    256 notes / 64 rows = 4 tracks. this must be first column, then second, then third...
+
+    empty (len 9 starting at 0xb6b) blocks also have 256 notes each!
+
+...
+
+Inst "Drums" starts at 0x142e
+    142e len 79
+    14ab ...
+
+note 0x05 at offset 0x142d
+
+counting notes:
+
+    0x142e: 1 63 1 3 1 1 1 1 1 3 1 1 1 3 1 1 1 1 1 1 1 3 1 3 1 3 1 1 1 1 1 3 1 1 1 3 1 1 1 1 1 1 1 3 1 196 = 321 (expected 320 probably miscounted)
