@@ -430,7 +430,6 @@ class Song:
         #
 
         section = props.add_section('ORDER LIST')
-        section.add_property('max_order', len(self.order_list))
 
         # TODO: When we include all 500 orders in the output, shaketracker
         # 0.4.6 sets song->pattern_data[i].rowlength to -1 for all patterns.
@@ -445,11 +444,10 @@ class Song:
         #
         # So we limit orders to 200, which is really enough, and that's the
         # normal maximum for shaketracker 0.4.6 anyway.
-        #
-        # file2.sht still fails to load with a segfault, but the rest of my
-        # load OK after this change.
+        order_list = self.order_list[:200]
 
-        for order_idx, order in enumerate(self.order_list[:200]):
+        section.add_property('max_order', len(order_list))
+        for order_idx, order in enumerate(order_list):
             if order is None:
                 order_value = -1
             else:
